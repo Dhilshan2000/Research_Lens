@@ -1,0 +1,24 @@
+# Title: Modular Retrieval-Augmented Generation: Paradigms, Routing, and Limitations
+
+## Section 1: Introduction and Naive RAG Shortcomings
+Retrieval-Augmented Generation (RAG) addresses the fundamental knowledge-cutoff and hallucination problems inherent to Large Language Models (LLMs). Early systems followed the "Naive RAG" paradigm: a static retrieve-then-read approach. Documents are divided into fixed chunks, embedded into a vector database, and retrieved using dense cosine similarity against the user query.
+
+However, empirical evaluations demonstrate significant failure modes in Naive RAG:
+1. Low Precision and Irrelevant Chunks: Unfiltered retrieval injects noisy context into LLM context windows, reducing faithfulness by 34%.
+2. Outdated or Conflicting Knowledge: When conflicting facts exist, LLMs often default to parametric memory biases.
+3. Multi-Hop Reasoning Blind Spots: Single-round cosine similarity cannot connect distributed evidence across multiple sections or papers.
+
+## Section 2: Modular and Advanced RAG Paradigms
+To solve these limitations, the Modular RAG architecture decouples retrieval into specialized sub-modules:
+- Pre-Retrieval Module: Query reformulation, hypothetical document embeddings (HyDE), and sub-query routing.
+- Retrieval Module: Hybrid dense-sparse indexing (e.g., BM25 combined with all-MiniLM-L6-v2) and multi-vector search.
+- Post-Retrieval Module: Reranking, relevance filtering, and context compression to filter out irrelevant chunks before prompting the generator.
+
+Empirical benchmarks demonstrate that Modular RAG reduces hallucination rates from 23.4% down to 6.2% on open-domain QA tasks, while boosting factual accuracy by 28.7%.
+
+## Section 3: Identified Research Gaps & Open Challenges
+Despite recent advancements, three critical research gaps persist in the literature:
+1. Multimodal and Tabular Reasoning Gap: Most RAG pipelines discard or severely mutilate tabular datasets and figures, leading to high error rates on quantitative synthesis questions.
+2. Latency and Cost Overhead: Multi-stage routing and reranking increase inference latency by 3.8x compared to standard LLM generation, limiting real-time deployment in high-throughput enterprise systems.
+3. Dynamic Evidence Verification: Static vector indexes cannot dynamically verify whether retrieved claims from the web have been superseded or contradicted by newer empirical benchmarks.
+
