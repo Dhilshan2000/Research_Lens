@@ -24,8 +24,8 @@ class VectorStore:
 
     def _init_faiss(self):
         try:
-            import faiss
-            self.faiss = faiss
+            import importlib
+            self.faiss = importlib.import_module("faiss")
             self._use_faiss = True
             logger.info("FAISS is available and initialized.")
         except Exception:

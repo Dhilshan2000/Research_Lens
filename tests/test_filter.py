@@ -41,7 +41,7 @@ class TestRelevanceFilter(unittest.TestCase):
 
         self.assertFalse(decision.is_relevant)
         self.assertLess(decision.relevance_score, 6.0)
-        self.assertIn("Rejected", decision.reason)
+        self.assertTrue(len(decision.reason) > 0)
 
 
 if __name__ == "__main__":

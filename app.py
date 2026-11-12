@@ -52,10 +52,19 @@ with st.sidebar:
     else:
         st.info("ℹ️ Groq API Key: Not set in `.env` (Deterministic mode active)")
 
+    model_options = [
+        "openai/gpt-oss-120b",
+        "openai/gpt-oss-20b",
+        "qwen/qwen3.8-27b",
+        "llama-3.3-70b-versatile",
+        "llama-3.1-8b-instant",
+        "mixtral-8x7b-32768"
+    ]
+    default_index = model_options.index(Config.GROQ_MODEL) if Config.GROQ_MODEL in model_options else 0
     groq_model = st.selectbox(
         "Synthesis LLM Model",
-        options=["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "mixtral-8x7b-32768"],
-        index=0,
+        options=model_options,
+        index=default_index,
         help="Groq instruction model for synthesis report generation."
     )
 

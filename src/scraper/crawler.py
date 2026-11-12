@@ -1,6 +1,6 @@
 import time
 import logging
-from typing import List, Set, Dict, Optional, Callable
+from typing import List, Set, Dict, Optional, Callable, Any
 from urllib.parse import urlparse, urljoin, urldefrag
 from urllib.robotparser import RobotFileParser
 import requests

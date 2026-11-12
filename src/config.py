@@ -10,8 +10,8 @@ load_dotenv(BASE_DIR / ".env")
 class Config:
     # Groq API configuration
     GROQ_API_KEY: str = os.getenv("GROQ_API_KEY", "")
-    GROQ_MODEL: str = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
-    GROQ_FILTER_MODEL: str = os.getenv("GROQ_FILTER_MODEL", "llama-3.1-8b-instant")
+    GROQ_MODEL: str = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
+    GROQ_FILTER_MODEL: str = os.getenv("GROQ_FILTER_MODEL", "openai/gpt-oss-20b")
 
     # Crawler configuration
     DEFAULT_CRAWL_DEPTH: int = int(os.getenv("DEFAULT_CRAWL_DEPTH", "1"))

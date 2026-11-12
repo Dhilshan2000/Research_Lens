@@ -73,9 +73,11 @@ class PageExtractor:
 
     def _try_js_rendering(self, url: str) -> Optional[ScrapedPageContent]:
         """Attempt to render via Playwright or Selenium if available."""
+        import importlib
         # Try Playwright
         try:
-            from playwright.sync_api import sync_playwright
+            playwright_module = importlib.import_module("playwright.sync_api")
+            sync_playwright = getattr(playwright_module, "sync_playwright")
             with sync_playwright() as p:
                 browser = p.chromium.launch(headless=True)
                 page = browser.new_page()
@@ -91,12 +93,12 @@ class PageExtractor:
 
         # Try Selenium
         try:
-            from selenium import webdriver
-            from selenium.webdriver.chrome.options import Options
-            options = Options()
+            selenium_webdriver = importlib.import_module("selenium.webdriver")
+            selenium_options = importlib.import_module("selenium.webdriver.chrome.options")
+            options = selenium_options.Options()
             options.add_argument("--headless")
             options.add_argument("--disable-gpu")
-            driver = webdriver.Chrome(options=options)
+            driver = selenium_webdriver.Chrome(options=options)
             driver.set_page_load_timeout(self.timeout)
             driver.get(url)
             rendered_html = driver.page_source
