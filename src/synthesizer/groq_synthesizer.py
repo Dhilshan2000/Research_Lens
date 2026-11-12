@@ -1,9 +1,10 @@
 import json
 import logging
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 
 from ..models.schemas import (
     DocumentChunk,
+    DocumentMetadata,
     ResearchReport,
     SynthesisSection,
     ComparisonRow,
@@ -12,6 +13,15 @@ from ..models.schemas import (
 from ..config import Config
 
 logger = logging.getLogger("ResearchLens.Synthesizer")
+
+
+def _format_location(meta: DocumentMetadata) -> str:
+    """Safely extracts location string without nested ternaries."""
+    if meta.page:
+        return f"Page {meta.page}"
+    if meta.section:
+        return f"Section: {meta.section}"
+    return "General"
 
 
 class GroqSynthesizer:
@@ -27,24 +37,15 @@ class GroqSynthesizer:
         self.api_key = api_key or Config.GROQ_API_KEY
         self.model_name = model_name or Config.GROQ_MODEL
 
-    def synthesize(
-        self,
-        retrieved_chunks: List[DocumentChunk],
-        user_instructions: str,
-        research_topic: Optional[str] = None,
-    ) -> ResearchReport:
-        """Synthesizes evidence chunks into a structured, citation-aware ResearchReport."""
-        if not retrieved_chunks:
-            return self._empty_report(user_instructions, research_topic)
-
-        # Build citations index from retrieved chunks
+    def _build_citations_and_context(self, retrieved_chunks: List[DocumentChunk]) -> Tuple[Dict[int, Citation], str]:
         citation_map: Dict[int, Citation] = {}
         context_blocks = []
 
         for idx, chunk in enumerate(retrieved_chunks, 1):
             meta = chunk.metadata
+            loc = _format_location(meta)
+
             if meta.source_type == "uploaded_document":
-                loc = f"Page {meta.page}" if meta.page else (f"Section: {meta.section}" if meta.section else "General")
                 label = f"{meta.filename} ({loc})"
                 cit = Citation(
                     citation_id=idx,
@@ -75,14 +76,10 @@ class GroqSynthesizer:
             )
 
         full_context = "\n---\n".join(context_blocks)
-        topic = research_topic or "Research Overview and Synthesis"
+        return citation_map, full_context
 
-        if not self.api_key or self.api_key.strip() == "":
-            logger.info("No Groq API key configured. Generating grounded synthesis report via deterministic synthesizer.")
-            return self._fallback_synthesis(topic, user_instructions, retrieved_chunks, citation_map)
-
-        # Call Groq API
-        prompt = f"""You are a distinguished research scientist and author.
+    def _build_prompt(self, topic: str, user_instructions: str, full_context: str) -> str:
+        return f"""You are a distinguished research scientist and author.
 You are tasked with generating a comprehensive, evidence-grounded research report based strictly on the provided evidence.
 
 TOPIC / TITLE:
@@ -128,10 +125,52 @@ Return ONLY a valid JSON object matching this schema:
 }}
 """
 
+    def _parse_groq_response(
+        self,
+        raw_json: str,
+        topic: str,
+        user_instructions: str,
+        retrieved_chunks: List[DocumentChunk],
+        citation_map: Dict[int, Citation]
+    ) -> ResearchReport:
+        data = json.loads(raw_json)
+        sections = [SynthesisSection(**s) for s in data.get("sections", [])]
+        comparison_table = [ComparisonRow(**r) for r in data.get("comparison_table", [])] if data.get("comparison_table") else None
+        gaps = data.get("research_gaps", [])
+
+        return ResearchReport(
+            title=data.get("title", topic),
+            executive_summary=data.get("executive_summary", ""),
+            instructions_applied=data.get("instructions_applied", user_instructions),
+            sections=sections,
+            comparison_table=comparison_table,
+            research_gaps=gaps,
+            citations=list(citation_map.values()),
+            metadata={"model": self.model_name, "chunk_count": len(retrieved_chunks)}
+        )
+
+    def synthesize(
+        self,
+        retrieved_chunks: List[DocumentChunk],
+        user_instructions: str,
+        research_topic: Optional[str] = None,
+    ) -> ResearchReport:
+        """Synthesizes evidence chunks into a structured, citation-aware ResearchReport."""
+        if not retrieved_chunks:
+            return self._empty_report(user_instructions, research_topic)
+
+        citation_map, full_context = self._build_citations_and_context(retrieved_chunks)
+        topic = research_topic or "Research Overview and Synthesis"
+
+        if not self.api_key or self.api_key.strip() == "":
+            logger.info("No Groq API key configured. Generating grounded synthesis report via deterministic synthesizer.")
+            return self._fallback_synthesis(topic, user_instructions, retrieved_chunks, citation_map)
+
+        prompt = self._build_prompt(topic, user_instructions, full_context)
+
         try:
             from groq import Groq
             client = Groq(api_key=self.api_key)
-
             response = client.chat.completions.create(
                 model=self.model_name,
                 messages=[
@@ -147,69 +186,36 @@ Return ONLY a valid JSON object matching this schema:
             )
 
             raw_json = response.choices[0].message.content
-            data = json.loads(raw_json)
-
-            sections = [SynthesisSection(**s) for s in data.get("sections", [])]
-            comparison_table = [ComparisonRow(**r) for r in data.get("comparison_table", [])] if data.get("comparison_table") else None
-            gaps = data.get("research_gaps", [])
-
-            return ResearchReport(
-                title=data.get("title", topic),
-                executive_summary=data.get("executive_summary", ""),
-                instructions_applied=data.get("instructions_applied", user_instructions),
-                sections=sections,
-                comparison_table=comparison_table,
-                research_gaps=gaps,
-                citations=list(citation_map.values()),
-                metadata={"model": self.model_name, "chunk_count": len(retrieved_chunks)}
-            )
+            return self._parse_groq_response(raw_json, topic, user_instructions, retrieved_chunks, citation_map)
 
         except Exception as e:
             logger.warning(f"Groq API call failed: {e}. Falling back to deterministic synthesizer.")
             return self._fallback_synthesis(topic, user_instructions, retrieved_chunks, citation_map)
 
-    def _fallback_synthesis(
+    def _build_fallback_sections(
         self,
-        topic: str,
-        user_instructions: str,
         retrieved_chunks: List[DocumentChunk],
-        citation_map: Dict[int, Citation]
-    ) -> ResearchReport:
-        """Deterministic grounded synthesis when Groq API key is not present or offline."""
-        doc_chunks = [c for c in retrieved_chunks if c.metadata.source_type == "uploaded_document"]
-        web_chunks = [c for c in retrieved_chunks if c.metadata.source_type == "web_scraped"]
+        doc_cit_ids: List[int],
+        web_cit_ids: List[int]
+    ) -> List[SynthesisSection]:
+        sections: List[SynthesisSection] = []
 
-        doc_cit_ids = [idx for idx, c in enumerate(retrieved_chunks, 1) if c.metadata.source_type == "uploaded_document"]
-        web_cit_ids = [idx for idx, c in enumerate(retrieved_chunks, 1) if c.metadata.source_type == "web_scraped"]
-
-        summary = (
-            f"This report presents a synthesized analysis of '{topic}', integrating evidence from "
-            f"{len(doc_chunks)} uploaded research document excerpts and {len(web_chunks)} verified web evidence sources. "
-            f"Key foundations are drawn from uploaded literature "
-            f"({', '.join(f'[{i}]' for i in doc_cit_ids[:3])}), complemented by recent findings and benchmarks "
-            f"identified in web references ({', '.join(f'[{i}]' for i in web_cit_ids[:3])})."
-        )
-
-        sections = []
-
-        # Section 1: Uploaded Research Evidence
-        if doc_chunks:
-            content_parts = []
+        if doc_cit_ids:
+            doc_parts = []
             for idx, c in enumerate(retrieved_chunks, 1):
                 if c.metadata.source_type == "uploaded_document":
                     loc = f"p.{c.metadata.page}" if c.metadata.page else (c.metadata.section or "sec")
-                    content_parts.append(
+                    doc_parts.append(
                         f"According to {c.metadata.filename} ({loc}) [{idx}], "
                         f"the analysis highlights: {c.text[:280]}..."
                     )
             sections.append(SynthesisSection(
                 title="Primary Findings from Uploaded Literature",
-                content="\n\n".join(content_parts),
+                content="\n\n".join(doc_parts),
                 citations=doc_cit_ids
             ))
 
-        # Section 2: Web Evidence & Industry Developments
-        if web_chunks:
+        if web_cit_ids:
             web_parts = []
             for idx, c in enumerate(retrieved_chunks, 1):
                 if c.metadata.source_type == "web_scraped":
@@ -224,7 +230,29 @@ Return ONLY a valid JSON object matching this schema:
                 citations=web_cit_ids
             ))
 
-        # Comparison Table
+        return sections
+
+    def _fallback_synthesis(
+        self,
+        topic: str,
+        user_instructions: str,
+        retrieved_chunks: List[DocumentChunk],
+        citation_map: Dict[int, Citation]
+    ) -> ResearchReport:
+        """Deterministic grounded synthesis when Groq API key is not present or offline."""
+        doc_cit_ids = [idx for idx, c in enumerate(retrieved_chunks, 1) if c.metadata.source_type == "uploaded_document"]
+        web_cit_ids = [idx for idx, c in enumerate(retrieved_chunks, 1) if c.metadata.source_type == "web_scraped"]
+
+        summary = (
+            f"This report presents a synthesized analysis of '{topic}', integrating evidence from "
+            f"{len(doc_cit_ids)} uploaded research document excerpts and {len(web_cit_ids)} verified web evidence sources. "
+            f"Key foundations are drawn from uploaded literature "
+            f"({', '.join(f'[{i}]' for i in doc_cit_ids[:3])}), complemented by recent findings and benchmarks "
+            f"identified in web references ({', '.join(f'[{i}]' for i in web_cit_ids[:3])})."
+        )
+
+        sections = self._build_fallback_sections(retrieved_chunks, doc_cit_ids, web_cit_ids)
+
         comparison_rows = [
             ComparisonRow(
                 dimension="Scope & Methodology",
@@ -240,10 +268,11 @@ Return ONLY a valid JSON object matching this schema:
             )
         ]
 
-        # Research Gaps
+        first_doc = doc_cit_ids[0] if doc_cit_ids else 1
+        first_web = web_cit_ids[0] if web_cit_ids else 1
         gaps = [
-            f"Methodological Generalization Gap: Limited cross-domain validation between isolated paper findings [{doc_cit_ids[0] if doc_cit_ids else 1}] and external deployment benchmarks.",
-            f"Temporal & Technological Horizon: Further longitudinal evaluation is required to assess whether results remain consistent across newer model architectures [{web_cit_ids[0] if web_cit_ids else 1}].",
+            f"Methodological Generalization Gap: Limited cross-domain validation between isolated paper findings [{first_doc}] and external deployment benchmarks.",
+            f"Temporal & Technological Horizon: Further longitudinal evaluation is required to assess whether results remain consistent across newer model architectures [{first_web}].",
             "Data Harmonization Gap: Divergent evaluation metrics between published academic benchmarks and web-reported empirical results."
         ]
 
@@ -266,4 +295,3 @@ Return ONLY a valid JSON object matching this schema:
             sections=[],
             citations=[]
         )
-

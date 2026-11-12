@@ -1,6 +1,6 @@
 import time
 import logging
-from typing import List, Set, Dict, Optional, Callable, Any
+from typing import List, Set, Dict, Optional, Callable, Any, Tuple
 from urllib.parse import urlparse, urljoin, urldefrag
 from urllib.robotparser import RobotFileParser
 import requests
@@ -12,6 +12,7 @@ from .extractor import PageExtractor
 from ..config import Config
 
 logger = logging.getLogger("ResearchLens.Crawler")
+HTML_PARSER = "html.parser"
 
 
 class BoundedCrawler:
@@ -51,7 +52,6 @@ class BoundedCrawler:
             parsed = urlparse(clean_url)
             if parsed.scheme not in ["http", "https"]:
                 return None
-            # Standardize by lowercasing domain and removing trailing slash if path is not root
             netloc = parsed.netloc.lower()
             path = parsed.path.rstrip("/") if parsed.path != "/" else "/"
             normalized = f"{parsed.scheme}://{netloc}{path}"
@@ -76,10 +76,7 @@ class BoundedCrawler:
             self._robots_cache[domain] = rp
         return self._robots_cache[domain].can_fetch(self.user_agent, url)
 
-    def discover_candidates(self, seed_urls: List[str]) -> List[DiscoveredPage]:
-        """Discovery phase: Discovers candidate pages without performing full extraction."""
-        self.state_machine.transition_to(CrawlState.INITIALIZING, {"seed_urls": seed_urls})
-
+    def _prepare_seeds(self, seed_urls: List[str]) -> Tuple[List[str], Set[str]]:
         valid_seeds: List[str] = []
         allowed_domains: Set[str] = set()
 
@@ -87,12 +84,70 @@ class BoundedCrawler:
             s = s.strip()
             if not s:
                 continue
-            if not s.startswith("http://") and not s.startswith("https://"):
-                s = "https://" + s
+            if not s.startswith(("http://", "https://")):
+                s = f"https://{s}"
             norm = self._normalize_url(s, s)
             if norm:
                 valid_seeds.append(norm)
                 allowed_domains.add(urlparse(norm).netloc.lower())
+
+        return valid_seeds, allowed_domains
+
+    def _extract_page_info(self, soup: BeautifulSoup, url: str) -> Tuple[str, str]:
+        title = ""
+        if soup.title and soup.title.string:
+            title = soup.title.string.strip()
+        else:
+            h1_el = soup.find("h1")
+            if h1_el is not None:
+                title = h1_el.get_text(strip=True)
+            else:
+                title = url
+
+        snippet = ""
+        meta_desc = soup.find("meta", attrs={"name": "description"}) or soup.find("meta", attrs={"property": "og:description"})
+        if meta_desc and meta_desc.get("content"):
+            snippet = meta_desc["content"].strip()
+        else:
+            p_el = soup.find("p")
+            if p_el is not None:
+                snippet = p_el.get_text(strip=True)[:250]
+
+        return title, snippet
+
+    def _extract_child_links(
+        self,
+        soup: BeautifulSoup,
+        url: str,
+        depth: int,
+        visited: Set[str],
+        allowed_domains: Set[str]
+    ) -> List[Dict[str, Any]]:
+        child_items: List[Dict[str, Any]] = []
+        for a in soup.find_all("a", href=True):
+            raw_href = a["href"].strip()
+            child_url = self._normalize_url(raw_href, url)
+            if not child_url or child_url in visited:
+                continue
+
+            child_domain = urlparse(child_url).netloc.lower()
+            if self.same_domain_only and child_domain not in allowed_domains:
+                continue
+
+            if any(child_url.lower().endswith(ext) for ext in [".jpg", ".png", ".gif", ".zip", ".tar", ".mp4", ".mp3", ".css", ".js"]):
+                continue
+
+            child_items.append({
+                "url": child_url,
+                "depth": depth + 1,
+                "parent": url
+            })
+        return child_items
+
+    def discover_candidates(self, seed_urls: List[str]) -> List[DiscoveredPage]:
+        """Discovery phase: Discovers candidate pages without performing full extraction."""
+        self.state_machine.transition_to(CrawlState.INITIALIZING, {"seed_urls": seed_urls})
+        valid_seeds, allowed_domains = self._prepare_seeds(seed_urls)
 
         if not valid_seeds:
             self.state_machine.fail("No valid seed URLs provided.")
@@ -109,82 +164,40 @@ class BoundedCrawler:
 
         while queue and len(candidates) < self.max_pages:
             current = queue.pop(0)
-            url = current["url"]
-            depth = current["depth"]
-            parent = current["parent"]
+            url, depth, parent = current["url"], current["depth"], current["parent"]
 
-            if url in visited:
+            if url in visited or not self._can_fetch(url):
                 continue
             visited.add(url)
-
-            if not self._can_fetch(url):
-                logger.info(f"Skipping {url} due to robots.txt restrictions.")
-                continue
 
             if self.progress_callback:
                 self.progress_callback(f"Discovering candidate: {url}", len(candidates), self.max_pages)
 
-            # Shallow fetch to get title, snippet, and child links
             try:
                 resp = self.session.get(url, timeout=self.timeout)
                 if resp.status_code != 200 or "text/html" not in resp.headers.get("Content-Type", ""):
                     continue
 
-                soup = BeautifulSoup(resp.text, "html.parser")
-                title = ""
-                if soup.title and soup.title.string:
-                    title = soup.title.string.strip()
-                elif soup.find("h1"):
-                    title = soup.find("h1").get_text(strip=True)
-                else:
-                    title = url
+                soup = BeautifulSoup(resp.text, HTML_PARSER)
+                title, snippet = self._extract_page_info(soup, url)
 
-                # Snippet from meta description or first paragraph
-                snippet = ""
-                meta_desc = soup.find("meta", attrs={"name": "description"}) or soup.find("meta", attrs={"property": "og:description"})
-                if meta_desc and meta_desc.get("content"):
-                    snippet = meta_desc["content"].strip()
-                elif soup.find("p"):
-                    snippet = soup.find("p").get_text(strip=True)[:250]
-
-                page_item = DiscoveredPage(
+                candidates.append(DiscoveredPage(
                     url=url,
                     title=title,
                     snippet=snippet,
                     parent_url=parent,
                     depth=depth,
                     status="discovered"
-                )
-                candidates.append(page_item)
+                ))
 
-                # Collect child links if depth < max_depth
                 if depth < self.max_depth and len(candidates) + len(queue) < self.max_pages * 2:
-                    for a in soup.find_all("a", href=True):
-                        raw_href = a["href"].strip()
-                        child_url = self._normalize_url(raw_href, url)
-                        if not child_url or child_url in visited:
-                            continue
+                    new_links = self._extract_child_links(soup, url, depth, visited, allowed_domains)
+                    queue.extend(new_links)
 
-                        child_domain = urlparse(child_url).netloc.lower()
-                        if self.same_domain_only and child_domain not in allowed_domains:
-                            continue
-
-                        # Avoid non-content extensions
-                        if any(child_url.lower().endswith(ext) for ext in [".jpg", ".png", ".gif", ".zip", ".tar", ".mp4", ".mp3", ".css", ".js"]):
-                            continue
-
-                        queue.append({
-                            "url": child_url,
-                            "depth": depth + 1,
-                            "parent": url
-                        })
-
-                # Polite crawl delay
                 time.sleep(0.1)
 
             except Exception as e:
                 logger.warning(f"Error discovering {url}: {e}")
-                continue
 
         logger.info(f"Discovery completed with {len(candidates)} candidate pages.")
         return candidates
@@ -217,4 +230,3 @@ class BoundedCrawler:
             "extracted_count": len(results)
         })
         return results
-

@@ -1,7 +1,7 @@
 import os
 import math
 import logging
-from typing import List, Union
+from typing import List
 import numpy as np
 
 from ..config import Config
@@ -42,7 +42,7 @@ class EmbeddingEngine:
     def dimension(self) -> int:
         return self._dimension
 
-    def encode(self, texts: Union[str, List[str]]) -> np.ndarray:
+    def encode(self, texts: str | List[str]) -> np.ndarray:
         """Encodes a single text or list of texts into normalized embedding vectors."""
         if isinstance(texts, str):
             single = True

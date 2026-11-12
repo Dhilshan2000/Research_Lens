@@ -9,6 +9,7 @@ from ..models.schemas import ScrapedPageContent
 from ..config import Config
 
 logger = logging.getLogger("ResearchLens.Extractor")
+HTML_PARSER = "html.parser"
 
 
 class PageExtractor:
@@ -43,16 +44,14 @@ class PageExtractor:
                 extraction_method="failed"
             )
 
-        soup = BeautifulSoup(html, "html.parser")
+        soup = BeautifulSoup(html, HTML_PARSER)
 
-        # Check if page is an empty JS-rendered SPA that needs JS rendering
         if self._requires_js_rendering(soup, html):
             logger.info(f"Page {url} requires JS rendering. Attempting fallback...")
             js_content = self._try_js_rendering(url)
             if js_content:
                 return js_content
 
-        # Standard extraction with BeautifulSoup
         return self._clean_and_parse_html(url, soup, status_code, method="requests_bs4")
 
     def _requires_js_rendering(self, soup: BeautifulSoup, html: str) -> bool:
@@ -74,6 +73,7 @@ class PageExtractor:
     def _try_js_rendering(self, url: str) -> Optional[ScrapedPageContent]:
         """Attempt to render via Playwright or Selenium if available."""
         import importlib
+
         # Try Playwright
         try:
             playwright_module = importlib.import_module("playwright.sync_api")
@@ -86,7 +86,7 @@ class PageExtractor:
                 rendered_html = page.content()
                 browser.close()
 
-                soup = BeautifulSoup(rendered_html, "html.parser")
+                soup = BeautifulSoup(rendered_html, HTML_PARSER)
                 return self._clean_and_parse_html(url, soup, 200, method="playwright")
         except Exception as e:
             logger.debug(f"Playwright rendering not available or failed: {e}")
@@ -104,42 +104,29 @@ class PageExtractor:
             rendered_html = driver.page_source
             driver.quit()
 
-            soup = BeautifulSoup(rendered_html, "html.parser")
+            soup = BeautifulSoup(rendered_html, HTML_PARSER)
             return self._clean_and_parse_html(url, soup, 200, method="selenium")
         except Exception as e:
             logger.debug(f"Selenium rendering not available or failed: {e}")
 
         return None
 
-    def _clean_and_parse_html(self, url: str, soup: BeautifulSoup, status_code: int, method: str) -> ScrapedPageContent:
-        """Removes boilerplate elements and normalizes text and section headings."""
-        # Title
-        title = ""
+    def _extract_page_title(self, soup: BeautifulSoup, url: str) -> str:
         if soup.title and soup.title.string:
-            title = soup.title.string.strip()
-        elif soup.find("h1"):
-            title = soup.find("h1").get_text(strip=True)
-        else:
-            parsed = urlparse(url)
-            title = parsed.path.strip("/").split("/")[-1] or parsed.netloc
+            return soup.title.string.strip()
+        h1_tag = soup.find("h1")
+        if h1_tag is not None:
+            return h1_tag.get_text(strip=True)
+        parsed = urlparse(url)
+        return parsed.path.strip("/").split("/")[-1] or parsed.netloc
 
-        # Remove clutter
+    def _clean_unwanted_tags(self, soup: BeautifulSoup):
         for tag in soup(["script", "style", "nav", "footer", "header", "aside", "form", "svg", "noscript", "iframe"]):
             tag.decompose()
-
-        # Remove common ad/cookie classes
         for tag in soup.find_all(class_=re.compile(r"(cookie|banner|ad-|advert|popup|modal|share-buttons)", re.IGNORECASE)):
             tag.decompose()
 
-        # Extract headings
-        headings = [h.get_text(strip=True) for h in soup.find_all(["h1", "h2", "h3", "h4"]) if h.get_text(strip=True)]
-
-        # Extract structured sections
-        cleaned_sections: List[Dict[str, str]] = []
-        current_heading = "Overview"
-        current_paragraphs: List[str] = []
-
-        # Convert tables to text before extracting paragraphs
+    def _convert_tables_to_text(self, soup: BeautifulSoup):
         for table in soup.find_all("table"):
             table_rows = []
             for tr in table.find_all("tr"):
@@ -151,6 +138,11 @@ class PageExtractor:
                 new_p = soup.new_tag("p")
                 new_p.string = f"\n[Table Data]:\n{table_text}\n"
                 table.replace_with(new_p)
+
+    def _extract_structured_sections(self, soup: BeautifulSoup) -> List[Dict[str, str]]:
+        cleaned_sections: List[Dict[str, str]] = []
+        current_heading = "Overview"
+        current_paragraphs: List[str] = []
 
         for element in soup.find_all(["h1", "h2", "h3", "p", "li"]):
             tag_name = element.name.lower()
@@ -166,9 +158,8 @@ class PageExtractor:
                     })
                     current_paragraphs = []
                 current_heading = text
-            else:
-                if len(text) > 20:  # Skip tiny noise
-                    current_paragraphs.append(text)
+            elif len(text) > 20:
+                current_paragraphs.append(text)
 
         if current_paragraphs:
             cleaned_sections.append({
@@ -176,12 +167,22 @@ class PageExtractor:
                 "content": "\n".join(current_paragraphs)
             })
 
-        # Full normalized text
-        full_text = "\n\n".join(
-            f"### {sec['heading']}\n{sec['content']}" for sec in cleaned_sections
-        ) if cleaned_sections else soup.get_text(separator="\n", strip=True)
+        return cleaned_sections
 
-        # Normalize excess whitespace
+    def _clean_and_parse_html(self, url: str, soup: BeautifulSoup, status_code: int, method: str) -> ScrapedPageContent:
+        """Removes boilerplate elements and normalizes text and section headings."""
+        title = self._extract_page_title(soup, url)
+        self._clean_unwanted_tags(soup)
+        self._convert_tables_to_text(soup)
+
+        headings = [h.get_text(strip=True) for h in soup.find_all(["h1", "h2", "h3", "h4"]) if h.get_text(strip=True)]
+        cleaned_sections = self._extract_structured_sections(soup)
+
+        if cleaned_sections:
+            full_text = "\n\n".join(f"### {sec['heading']}\n{sec['content']}" for sec in cleaned_sections)
+        else:
+            full_text = soup.get_text(separator="\n", strip=True)
+
         full_text = re.sub(r"\n{3,}", "\n\n", full_text).strip()
 
         return ScrapedPageContent(
@@ -194,4 +195,3 @@ class PageExtractor:
             status_code=status_code,
             metadata={"domain": urlparse(url).netloc, "char_count": len(full_text)}
         )
-

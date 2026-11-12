@@ -23,7 +23,7 @@ class TestRelevanceFilter(unittest.TestCase):
 
         self.assertTrue(decision.is_relevant)
         self.assertGreaterEqual(decision.relevance_score, 6.0)
-        self.assertTrue(len(decision.reason) > 0)
+        self.assertGreater(len(decision.reason), 0)
 
     def test_rejection_of_boilerplate(self):
         junk_page = DiscoveredPage(
@@ -41,7 +41,7 @@ class TestRelevanceFilter(unittest.TestCase):
 
         self.assertFalse(decision.is_relevant)
         self.assertLess(decision.relevance_score, 6.0)
-        self.assertTrue(len(decision.reason) > 0)
+        self.assertGreater(len(decision.reason), 0)
 
 
 if __name__ == "__main__":

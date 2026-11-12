@@ -122,13 +122,14 @@ with col2:
         help="The core research theme used for filtering web evidence and organizing the synthesis report."
     )
 
+    CUSTOM_DIRECTIVES = "Custom Directives"
     preset = st.selectbox(
         "Instruction Presets:",
         options=[
             "Standard Brief (Academic tone, research gaps, comparison table, under 4 pages)",
             "Literature Review & Methodological Analysis",
             "Executive Briefing & Strategic Gaps",
-            "Custom Directives"
+            CUSTOM_DIRECTIVES
         ],
         index=0
     )
@@ -146,13 +147,13 @@ with col2:
             "Deliver an executive briefing summarizing business implications, architectural trade-offs, and critical gaps in adoption. "
             "Maintain a formal professional tone, highlight key bottlenecks, and construct a synthesis comparison matrix."
         ),
-        "Custom Directives": ""
+        CUSTOM_DIRECTIVES: ""
     }
 
     default_instruction = preset_texts.get(preset, "")
     user_instructions = st.text_area(
         "Report Directives & Instructions:",
-        value=default_instruction if preset != "Custom Directives" else "",
+        value=default_instruction if preset != CUSTOM_DIRECTIVES else "",
         placeholder="e.g. Focus on research gaps, use an academic tone, add a comparison table...",
         height=140
     )
