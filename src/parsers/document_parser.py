@@ -1,5 +1,6 @@
 import os
 import re
+import importlib
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 from dataclasses import dataclass, field
@@ -42,29 +43,29 @@ class DocumentParser:
             raise ValueError(f"Unsupported file format: {ext}. Supported formats: PDF, DOCX, TXT, CSV, XLSX.")
 
     @classmethod
-    def parse_pdf(cls, file_path: str, filename: str) -> List[ParsedDocumentItem]:
+    def _detect_pdf_section(cls, text: str, current_section: str) -> str:
+        section_pattern = re.compile(r"^(?:\d+\.|\b[IVXLCDM]+\.|\bSection\b|[A-Z\s]{4,}\b)", re.IGNORECASE)
+        lines = [line.strip() for line in text.split("\n") if line.strip()]
+        for line in lines[:5]:
+            if len(line) < 60 and (line.isupper() or section_pattern.match(line)) and not line.isdigit():
+                return line.title()
+        return current_section
+
+    @classmethod
+    def _parse_pdf_fitz(cls, file_path: str, filename: str) -> List[ParsedDocumentItem]:
+        fitz = importlib.import_module("fitz")
+        doc = fitz.open(file_path)
         items: List[ParsedDocumentItem] = []
         try:
-            import fitz  # PyMuPDF
-            doc = fitz.open(file_path)
             total_pages = len(doc)
-
             current_section = "Introduction"
-            section_pattern = re.compile(r"^(?:[0-9]+\.|\b[IVXLCDM]+\.|\bSection\b|[A-Z\s]{4,}\b)", re.IGNORECASE)
-
             for page_idx in range(total_pages):
                 page = doc[page_idx]
                 text = page.get_text("text").strip()
                 if not text:
                     continue
 
-                # Identify prospective section heading on this page
-                lines = [l.strip() for l in text.split("\n") if l.strip()]
-                for line in lines[:5]:
-                    if (len(line) < 60 and (line.isupper() or section_pattern.match(line))) and not line.isdigit():
-                        current_section = line.title()
-                        break
-
+                current_section = cls._detect_pdf_section(text, current_section)
                 items.append(ParsedDocumentItem(
                     text=text,
                     filename=filename,
@@ -74,91 +75,106 @@ class DocumentParser:
                     section=current_section,
                     extra_metadata={"page_char_count": len(text)}
                 ))
-            doc.close()
             return items
+        finally:
+            doc.close()
 
-        except ImportError:
-            # Fallback to pypdf if PyMuPDF is not installed
+    @classmethod
+    def _parse_pdf_pypdf(cls, file_path: str, filename: str) -> List[ParsedDocumentItem]:
+        pypdf = importlib.import_module("pypdf")
+        reader = pypdf.PdfReader(file_path)
+        items: List[ParsedDocumentItem] = []
+        total_pages = len(reader.pages)
+        for page_idx, page in enumerate(reader.pages):
+            text = (page.extract_text() or "").strip()
+            if text:
+                items.append(ParsedDocumentItem(
+                    text=text,
+                    filename=filename,
+                    file_type="pdf",
+                    page=page_idx + 1,
+                    total_pages=total_pages,
+                    section=f"Page {page_idx + 1}",
+                    extra_metadata={"page_char_count": len(text)}
+                ))
+        return items
+
+    @classmethod
+    def parse_pdf(cls, file_path: str, filename: str) -> List[ParsedDocumentItem]:
+        try:
+            return cls._parse_pdf_fitz(file_path, filename)
+        except (ImportError, ModuleNotFoundError):
             try:
-                import pypdf
-                reader = pypdf.PdfReader(file_path)
-                total_pages = len(reader.pages)
-                for page_idx, page in enumerate(reader.pages):
-                    text = page.extract_text() or ""
-                    text = text.strip()
-                    if text:
-                        items.append(ParsedDocumentItem(
-                            text=text,
-                            filename=filename,
-                            file_type="pdf",
-                            page=page_idx + 1,
-                            total_pages=total_pages,
-                            section=f"Page {page_idx + 1}",
-                            extra_metadata={"page_char_count": len(text)}
-                        ))
-                return items
+                return cls._parse_pdf_pypdf(file_path, filename)
             except Exception as e:
-                raise RuntimeError(f"Error parsing PDF '{filename}': {str(e)}")
+                raise RuntimeError(f"Error parsing PDF '{filename}': {str(e)}") from e
         except Exception as e:
-            raise RuntimeError(f"Error parsing PDF '{filename}': {str(e)}")
+            raise RuntimeError(f"Error parsing PDF '{filename}': {str(e)}") from e
+
+    @classmethod
+    def _extract_docx_paragraphs(cls, doc: Any, filename: str) -> List[ParsedDocumentItem]:
+        items: List[ParsedDocumentItem] = []
+        current_section = "Main Content"
+        current_paragraphs: List[str] = []
+
+        for p in doc.paragraphs:
+            text = p.text.strip()
+            if not text:
+                continue
+
+            if p.style and p.style.name.startswith("Heading"):
+                if current_paragraphs:
+                    items.append(ParsedDocumentItem(
+                        text="\n\n".join(current_paragraphs),
+                        filename=filename,
+                        file_type="docx",
+                        section=current_section,
+                        extra_metadata={"paragraph_count": len(current_paragraphs)}
+                    ))
+                    current_paragraphs = []
+                current_section = text
+            else:
+                current_paragraphs.append(text)
+
+        if current_paragraphs:
+            items.append(ParsedDocumentItem(
+                text="\n\n".join(current_paragraphs),
+                filename=filename,
+                file_type="docx",
+                section=current_section,
+                extra_metadata={"paragraph_count": len(current_paragraphs)}
+            ))
+        return items
+
+    @classmethod
+    def _extract_docx_tables(cls, doc: Any, filename: str) -> List[ParsedDocumentItem]:
+        items: List[ParsedDocumentItem] = []
+        for table_idx, table in enumerate(doc.tables):
+            table_data = []
+            for row in table.rows:
+                row_data = [cell.text.strip() for cell in row.cells]
+                if any(row_data):
+                    table_data.append(" | ".join(row_data))
+            if table_data:
+                items.append(ParsedDocumentItem(
+                    text="\n".join(table_data),
+                    filename=filename,
+                    file_type="docx",
+                    section=f"Table {table_idx + 1}",
+                    extra_metadata={"is_table": True, "rows": len(table_data)}
+                ))
+        return items
 
     @classmethod
     def parse_docx(cls, file_path: str, filename: str) -> List[ParsedDocumentItem]:
         try:
-            import docx
+            docx = importlib.import_module("docx")
             doc = docx.Document(file_path)
-            items: List[ParsedDocumentItem] = []
-
-            current_section = "Main Content"
-            current_paragraphs: List[str] = []
-
-            for p in doc.paragraphs:
-                text = p.text.strip()
-                if not text:
-                    continue
-
-                if p.style and p.style.name.startswith("Heading"):
-                    if current_paragraphs:
-                        items.append(ParsedDocumentItem(
-                            text="\n\n".join(current_paragraphs),
-                            filename=filename,
-                            file_type="docx",
-                            section=current_section,
-                            extra_metadata={"paragraph_count": len(current_paragraphs)}
-                        ))
-                        current_paragraphs = []
-                    current_section = text
-                else:
-                    current_paragraphs.append(text)
-
-            if current_paragraphs:
-                items.append(ParsedDocumentItem(
-                    text="\n\n".join(current_paragraphs),
-                    filename=filename,
-                    file_type="docx",
-                    section=current_section,
-                    extra_metadata={"paragraph_count": len(current_paragraphs)}
-                ))
-
-            # Also parse tables if present
-            for table_idx, table in enumerate(doc.tables):
-                table_data = []
-                for row in table.rows:
-                    row_data = [cell.text.strip() for cell in row.cells]
-                    if any(row_data):
-                        table_data.append(" | ".join(row_data))
-                if table_data:
-                    items.append(ParsedDocumentItem(
-                        text="\n".join(table_data),
-                        filename=filename,
-                        file_type="docx",
-                        section=f"Table {table_idx + 1}",
-                        extra_metadata={"is_table": True, "rows": len(table_data)}
-                    ))
-
+            items = cls._extract_docx_paragraphs(doc, filename)
+            items.extend(cls._extract_docx_tables(doc, filename))
             return items
         except Exception as e:
-            raise RuntimeError(f"Error parsing DOCX '{filename}': {str(e)}")
+            raise RuntimeError(f"Error parsing DOCX '{filename}': {str(e)}") from e
 
     @classmethod
     def parse_txt(cls, file_path: str, filename: str) -> List[ParsedDocumentItem]:
