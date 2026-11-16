@@ -100,10 +100,27 @@ TOP_K_RETRIEVAL=5
 *(Note: ResearchLens reads your Groq API Key exclusively from the `.env` configuration file.)*
 
 ### 5. Launch the Application
+
+#### Option A: Full CRUD Web Application (FastAPI + SQLite + React Vite SPA) — *Recommended*
+Run the FastAPI application server:
+```bash
+uvicorn src.server:app --reload --port 8000
+```
+Open your browser at **`http://localhost:8000`** to access the complete ResearchLens CRUD workstation.
+
+To run the frontend in development mode with instant hot-reloading (HMR):
+```bash
+cd frontend
+npm install
+npm run dev
+```
+Open **`http://localhost:5173`** (automatically proxies API requests to FastAPI on port 8000).
+
+#### Option B: Streamlit Dashboard UI
 ```bash
 streamlit run app.py
 ```
-Open your browser at `http://localhost:8501`.
+Open your browser at **`http://localhost:8501`**.
 
 ---
 
@@ -148,12 +165,12 @@ Research_Lens/
 ├── requirements.txt            # Python dependencies
 ├── README.md                   # System documentation & quickstart
 ├── app.py                      # Interactive Streamlit application
-├── data/
-│   └── samples/                # Sample papers and benchmark datasets
-│       ├── rag_modular_survey.txt
-│       └── rag_benchmarks.csv
 ├── src/
+│   ├── server.py               # FastAPI REST API & SPA static file server
 │   ├── config.py               # Central configuration & directory setup
+│   ├── database/               # SQLite persistent CRUD database service
+│   │   ├── __init__.py
+│   │   └── db.py
 │   ├── models/
 │   │   └── schemas.py          # Pydantic schemas (Chunks, Pages, Decisions, Reports)
 │   ├── parsers/
@@ -165,6 +182,30 @@ Research_Lens/
 │   ├── filter/
 │   │   └── relevance_filter.py # Groq structured LLM filter with rejection reasons
 │   ├── rag/
+│   │   ├── chunker.py          # Token window chunker (tiktoken with source metadata)
+│   │   ├── embeddings.py       # Sentence-Transformers semantic embeddings
+│   │   └── vector_store.py     # Vector index with NumPy/FAISS fallback
+│   ├── synthesizer/
+│   │   └── groq_synthesizer.py # Evidence-grounded synthesis & comparison matrix generator
+│   └── exporter/
+│       └── pdf_generator.py    # Publication-ready ReportLab PDF generator
+├── frontend/                   # Modern React + Vite + Tailwind CSS Single-Page Application
+│   ├── src/
+│   │   ├── App.jsx             # Root application orchestrator
+│   │   ├── api.js              # REST API client
+│   │   └── components/         # Dashboard, ProjectDetail, Reports, Documents, Crawler
+│   ├── package.json
+│   └── vite.config.js
+├── tests/                      # Automated unit and integration test suite
+│   ├── test_api_crud.py        # REST API & Database CRUD lifecycle tests
+│   ├── test_parsers.py
+│   ├── test_crawler.py
+│   ├── test_extractor.py
+│   ├── test_filter.py
+│   ├── test_chunker.py
+│   ├── test_rag.py
+│   ├── test_pdf.py
+│   └── test_end_to_end.py
 │   │   ├── chunker.py          # ~500-800 token chunker with 10-20% overlap & metadata
 │   │   ├── embeddings.py       # Sentence-Transformers (all-MiniLM-L6-v2) & vector engine
 │   │   └── vector_store.py     # FAISS / Cosine vector store & top-k retrieval

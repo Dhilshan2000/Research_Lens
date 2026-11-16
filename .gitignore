@@ -40,8 +40,16 @@ wheels/
 chroma_db/
 faiss_index/
 data/cache/
+data/uploads/
+data/exports/
+*.db
 downloads/
 temp/
+
+# Node & Frontend
+node_modules/
+frontend/node_modules/
+frontend/dist/
 
 # Logs & testing
 *.log
@@ -52,4 +60,3 @@ htmlcov/
 # Operating System Files
 .DS_Store
 Thumbs.db
-
