@@ -281,23 +281,21 @@ export default function ReportView({
                     <table className="w-full text-left text-xs border-collapse">
                       <thead>
                         <tr className="border-b border-[#30363d] text-gray-400 bg-[#0d1117]">
-                          <th className="py-2.5 px-3 font-semibold">Approach / System</th>
-                          <th className="py-2.5 px-3 font-semibold">Dataset / Scope</th>
-                          <th className="py-2.5 px-3 font-semibold">Metrics & Results</th>
-                          <th className="py-2.5 px-3 font-semibold">Architecture Details</th>
-                          <th className="py-2.5 px-3 font-semibold">Limitations / Gaps</th>
+                          <th className="py-2.5 px-3 font-semibold">Dimension / Focus</th>
+                          <th className="py-2.5 px-3 font-semibold">Uploaded Document Findings</th>
+                          <th className="py-2.5 px-3 font-semibold">Filtered Web Evidence</th>
+                          <th className="py-2.5 px-3 font-semibold">Synthesized Conclusion</th>
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-[#30363d]/60">
                         {activeReport.comparison_table.map((row, idx) => (
                           <tr key={idx} className="hover:bg-white/[0.02]">
                             <td className="py-2.5 px-3 font-semibold text-white whitespace-nowrap">
-                              {row.approach || row.system || `Item ${idx + 1}`}
+                              {row.dimension || `Item ${idx + 1}`}
                             </td>
-                            <td className="py-2.5 px-3 text-gray-300">{row.dataset || '-'}</td>
-                            <td className="py-2.5 px-3 text-emerald-400 font-mono">{row.metrics || '-'}</td>
-                            <td className="py-2.5 px-3 text-gray-300">{row.architecture || '-'}</td>
-                            <td className="py-2.5 px-3 text-amber-300">{row.limitations || '-'}</td>
+                            <td className="py-2.5 px-3 text-gray-300">{row.uploaded_findings || '-'}</td>
+                            <td className="py-2.5 px-3 text-emerald-400">{row.web_findings || '-'}</td>
+                            <td className="py-2.5 px-3 text-gray-200">{row.synthesis || '-'}</td>
                           </tr>
                         ))}
                       </tbody>
@@ -341,28 +339,28 @@ export default function ReportView({
                         className="bg-[#0d1117] border border-[#30363d]/60 rounded-lg p-3 text-xs space-y-1.5"
                       >
                         <div className="flex items-center justify-between">
-                          <span className="font-semibold text-white truncate max-w-[200px]">
-                            {cite.title || cite.source || `Citation [${idx + 1}]`}
+                          <span className="font-semibold text-white truncate max-w-[200px]" title={cite.source_label || cite.title}>
+                            {cite.source_label || cite.title || `Citation [${cite.citation_id || idx + 1}]`}
                           </span>
                           <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-indigo-500/10 text-indigo-400 border border-indigo-500/20">
-                            {cite.source_type || 'source'}
+                            {cite.source_type === 'uploaded_document' ? 'File' : 'Web'}
                           </span>
                         </div>
 
-                        {cite.page && (
+                        {cite.page_or_section && (
                           <div className="text-gray-400 text-[11px]">
-                            Page: {cite.page} {cite.section && `• Section: ${cite.section}`}
+                            Location: {cite.page_or_section}
                           </div>
                         )}
 
-                        {cite.url && (
+                        {cite.url_or_file && (cite.url_or_file.startsWith('http://') || cite.url_or_file.startsWith('https://')) && (
                           <a
-                            href={cite.url}
+                            href={cite.url_or_file}
                             target="_blank"
                             rel="noreferrer"
                             className="inline-flex items-center space-x-1 text-indigo-400 hover:text-indigo-300 text-[11px] truncate max-w-full"
                           >
-                            <span className="truncate">{cite.url}</span>
+                            <span className="truncate">{cite.url_or_file}</span>
                             <ExternalLink className="w-3 h-3 shrink-0" />
                           </a>
                         )}

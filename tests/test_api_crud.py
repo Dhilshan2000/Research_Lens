@@ -1,5 +1,6 @@
 import unittest
-import json
+import io
+from pathlib import Path
 from starlette.testclient import TestClient
 from src.server import app
 from src.database.db import init_db
@@ -69,6 +70,50 @@ class TestApiCRUD(unittest.TestCase):
         # Confirm 404 after delete
         res_check = self.client.get(f"/api/projects/{proj_id}")
         self.assertEqual(res_check.status_code, 404)
+
+    def test_report_generation_api(self):
+        # 1. Create Project
+        create_payload = {
+            "title": "Report Generation Test",
+            "topic": "Modular RAG Architectures",
+            "directives": "Include comparison table and research gaps",
+            "preset": "Standard Brief",
+            "model": "openai/gpt-oss-120b",
+            "seed_urls": [],
+            "top_k": 3
+        }
+        res_proj = self.client.post("/api/projects", json=create_payload)
+        self.assertEqual(res_proj.status_code, 201)
+        proj_id = res_proj.json()["id"]
+
+        try:
+            # 2. Upload sample text document
+            file_content = b"# Modular RAG Overview\nModular RAG incorporates specialized modules for retrieval, routing, and synthesis.\nRecent evaluations on RGB benchmarks show 84.5% recall."
+            files = [("files", ("test_modular_rag.txt", io.BytesIO(file_content), "text/plain"))]
+            res_upload = self.client.post(f"/api/projects/{proj_id}/documents", files=files)
+            self.assertEqual(res_upload.status_code, 200)
+            self.assertEqual(len(res_upload.json()), 1)
+
+            # 3. Trigger Report Generation
+            res_gen = self.client.post(f"/api/projects/{proj_id}/generate-report")
+            self.assertEqual(res_gen.status_code, 200)
+            report = res_gen.json()
+            self.assertIn("id", report)
+            self.assertTrue(len(report["title"]) > 0)
+            self.assertTrue(len(report["executive_summary"]) > 0)
+            self.assertTrue(len(report["detailed_synthesis"]) > 0)
+            self.assertIn("comparison_table", report)
+            self.assertIn("citations", report)
+            report_id = report["id"]
+
+            # 4. Test PDF download endpoint
+            res_pdf = self.client.get(f"/api/reports/{report_id}/pdf")
+            self.assertEqual(res_pdf.status_code, 200)
+            self.assertTrue(res_pdf.content.startswith(b"%PDF"))
+
+        finally:
+            # Cleanup project
+            self.client.delete(f"/api/projects/{proj_id}")
 
 if __name__ == "__main__":
     unittest.main()

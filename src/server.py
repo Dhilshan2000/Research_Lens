@@ -398,85 +398,96 @@ def generate_report(project_id: str):
             detail="Cannot generate report: Please upload at least one document or run a crawl on seed URLs first."
         )
 
-    # 1. Parse all documents
-    parsed_items = []
-    for d in docs:
-        if Path(d["file_path"]).exists():
-            try:
-                items = DocumentParser.parse_file(d["file_path"], original_filename=d["filename"])
-                parsed_items.extend(items)
-            except Exception as e:
-                print(f"Warning parsing document {d['filename']}: {e}")
+    try:
+        # 1. Parse all documents
+        parsed_items = []
+        for d in docs:
+            if Path(d["file_path"]).exists():
+                try:
+                    items = DocumentParser.parse_file(d["file_path"], original_filename=d["filename"])
+                    parsed_items.extend(items)
+                except Exception as e:
+                    print(f"Warning parsing document {d['filename']}: {e}")
 
-    # 2. Chunk documents
-    chunker = DocumentChunker(chunk_size=proj["chunk_size"], chunk_overlap=proj["chunk_overlap"])
-    all_chunks: List[DocumentChunk] = []
-    if parsed_items:
-        doc_chunks = chunker.chunk_document_items(parsed_items)
-        all_chunks.extend(doc_chunks)
+        # 2. Chunk documents
+        chunker = DocumentChunker(chunk_size=proj["chunk_size"], chunk_overlap=proj["chunk_overlap"])
+        all_chunks: List[DocumentChunk] = []
+        if parsed_items:
+            doc_chunks = chunker.chunk_document_items(parsed_items)
+            all_chunks.extend(doc_chunks)
 
-    # 3. Extract and chunk relevant crawled pages
-    relevant_crawled = [cp for cp in crawled_pages if cp["is_relevant"]]
-    if relevant_crawled:
-        crawler = BoundedCrawler(same_domain_only=proj.get("same_domain", True))
-        selected_pages = [
-            DiscoveredPage(
-                url=cp["url"],
-                title=cp["title"],
-                snippet="",
-                depth=cp["depth"]
-            )
-            for cp in relevant_crawled
-        ]
-        scraped_pages: List[ScrapedPageContent] = crawler.extract_selected(selected_pages)
-        if scraped_pages:
-            web_chunks = chunker.chunk_scraped_pages(scraped_pages)
-            all_chunks.extend(web_chunks)
+        # 3. Extract and chunk relevant crawled pages
+        relevant_crawled = [cp for cp in crawled_pages if cp["is_relevant"]]
+        if relevant_crawled:
+            crawler = BoundedCrawler(same_domain_only=proj.get("same_domain", True))
+            selected_pages = [
+                DiscoveredPage(
+                    url=cp["url"],
+                    title=cp["title"],
+                    snippet="",
+                    depth=cp["depth"]
+                )
+                for cp in relevant_crawled
+            ]
+            scraped_pages: List[ScrapedPageContent] = crawler.extract_selected(selected_pages)
+            if scraped_pages:
+                web_chunks = chunker.chunk_scraped_pages(scraped_pages)
+                all_chunks.extend(web_chunks)
 
-    if not all_chunks:
-        raise HTTPException(status_code=400, detail="No text chunks could be extracted from sources.")
+        if not all_chunks:
+            raise HTTPException(status_code=400, detail="No text chunks could be extracted from sources.")
 
-    # 4. RAG Indexing & Top-K Retrieval
-    embedding_engine = EmbeddingEngine()
-    vector_store = VectorStore(embedding_engine=embedding_engine)
-    vector_store.add_chunks(all_chunks)
+        # 4. RAG Indexing & Top-K Retrieval
+        embedding_engine = EmbeddingEngine()
+        vector_store = VectorStore(embedding_engine=embedding_engine)
+        vector_store.add_chunks(all_chunks)
 
-    query = f"{proj['topic']} {proj['directives']}"
-    retrieved_chunks = vector_store.similarity_search(query=query, top_k=proj["top_k"])
+        query = f"{proj['topic']} {proj['directives']}"
+        retrieved_chunks = vector_store.similarity_search(query=query, top_k=proj["top_k"])
 
-    # 5. Groq Synthesizer
-    synthesizer = GroqSynthesizer(api_key=Config.GROQ_API_KEY, model_name=proj["model"])
-    synth_report: ResearchReport = synthesizer.synthesize(
-        retrieved_chunks=retrieved_chunks,
-        user_instructions=proj["directives"],
-        research_topic=proj["topic"]
-    )
+        # 5. Groq Synthesizer
+        synthesizer = GroqSynthesizer(api_key=Config.GROQ_API_KEY, model_name=proj["model"])
+        synth_report: ResearchReport = synthesizer.synthesize(
+            retrieved_chunks=retrieved_chunks,
+            user_instructions=proj["directives"],
+            research_topic=proj["topic"]
+        )
 
-    # 6. Generate Publication-Ready PDF
-    pdf_gen = PDFReportGenerator()
-    pdf_bytes = pdf_gen.generate_pdf(synth_report)
-    
-    # Save PDF to disk
-    pdf_filename = f"report_{proj['id'][:8]}_{len(DatabaseService.get_reports(project_id)) + 1}.pdf"
-    pdf_path = Config.EXPORTS_DIR / pdf_filename
-    pdf_path.write_bytes(pdf_bytes)
+        # 6. Generate Publication-Ready PDF
+        pdf_gen = PDFReportGenerator()
+        pdf_bytes = pdf_gen.generate_pdf(synth_report)
+        
+        # Save PDF to disk
+        pdf_filename = f"report_{proj['id'][:8]}_{len(DatabaseService.get_reports(project_id)) + 1}.pdf"
+        pdf_path = Config.EXPORTS_DIR / pdf_filename
+        pdf_path.write_bytes(pdf_bytes)
 
-    # 7. Save Report in Database
-    report_dict = DatabaseService.create_report(
-        project_id=project_id,
-        report_data={
-            "title": synth_report.title,
-            "executive_summary": synth_report.executive_summary,
-            "detailed_synthesis": synth_report.detailed_synthesis,
-            "comparison_table": [r.model_dump() for r in synth_report.comparison_table],
-            "research_gaps": synth_report.research_gaps,
-            "citations": [c.model_dump() for c in synth_report.citations],
-            "pdf_path": str(pdf_path),
-            "model_used": proj["model"]
-        }
-    )
+        # Format detailed synthesis text from sections
+        detailed_synthesis_text = "\n\n".join(
+            f"### {sec.title}\n\n{sec.content}" for sec in synth_report.sections
+        ) if synth_report.sections else ""
 
-    return report_dict
+        # 7. Save Report in Database
+        report_dict = DatabaseService.create_report(
+            project_id=project_id,
+            report_data={
+                "title": synth_report.title,
+                "executive_summary": synth_report.executive_summary,
+                "detailed_synthesis": detailed_synthesis_text,
+                "comparison_table": [r.model_dump() for r in (synth_report.comparison_table or [])],
+                "research_gaps": synth_report.research_gaps or [],
+                "citations": [c.model_dump() for c in (synth_report.citations or [])],
+                "pdf_path": str(pdf_path),
+                "model_used": proj["model"]
+            }
+        )
+
+        return report_dict
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error during report generation: {e}")
+        raise HTTPException(status_code=500, detail=f"Report generation error: {str(e)}") from e
 
 
 @app.get("/api/reports/{report_id}/pdf")
