@@ -38,6 +38,7 @@ wheels/
 
 # Database & Vector Store storage
 chroma_db/
+data/chroma_db/
 faiss_index/
 data/cache/
 data/uploads/
@@ -45,6 +46,8 @@ data/exports/
 *.db
 downloads/
 temp/
+*.pdf
+!ResearchLens_3-Day_Project_Brief.pdf
 
 # Node & Frontend
 node_modules/

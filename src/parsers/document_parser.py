@@ -1,5 +1,6 @@
 import os
 import re
+import unicodedata
 import importlib
 from pathlib import Path
 from typing import List, Dict, Any, Optional
@@ -18,9 +19,55 @@ class ParsedDocumentItem:
     extra_metadata: Dict[str, Any] = field(default_factory=dict)
 
 
+def clean_research_text(text: str) -> str:
+    """Advanced data cleaning and normalization for research text:
+    - Normalizes Unicode (NFKC, converting ligatures fi, fl, smart quotes)
+    - De-hyphenates words split across line breaks (e.g. 'trans-\nformer' -> 'transformer')
+    - Strips recurring running headers, footers, and page numbers
+    - Normalizes whitespace, leader dots, and redundant newlines
+    """
+    if not text:
+        return ""
+
+    # 1. Unicode normalization (converts ligatures like \ufb01 -> fi, curly quotes, non-breaking spaces)
+    text = unicodedata.normalize("NFKC", text)
+
+    # 2. De-hyphenation of line-broken words
+    text = re.sub(r"(\b[a-zA-Z]{2,})-\s*\n\s*([a-zA-Z]{2,}\b)", r"\1\2", text)
+
+    # 3. Clean running page numbers, DOIs, and copyright footers
+    lines = text.split("\n")
+    cleaned_lines = []
+    page_num_regex = re.compile(r"^(?:page\s+\d+(?:\s+of\s+\d+)?|\d+\s*/\s*\d+|-\s*\d+\s*-|\d+)$", re.IGNORECASE)
+    footer_regex = re.compile(r"(?:all rights reserved|copyright\s+©|proceedings\s+of\s+the|published\s+by|issn\s+\d+|doi:\s*10\.\d+)", re.IGNORECASE)
+
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            cleaned_lines.append("")
+            continue
+        # Drop standalone page numbers
+        if page_num_regex.match(stripped):
+            continue
+        # Drop standalone footer/copyright boilerplates
+        if len(stripped) < 120 and footer_regex.search(stripped):
+            continue
+        # Remove leader dots (e.g., in tables of contents: 'Introduction ........... 4')
+        cleaned_line = re.sub(r"\.{3,}\s*\d*$", "", stripped)
+        cleaned_lines.append(cleaned_line)
+
+    text = "\n".join(cleaned_lines)
+
+    # 4. Collapse repetitive newlines and whitespace
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+
+    return text.strip()
+
+
 class DocumentParser:
     """Multi-format parser for research papers and supplementary data.
-    Supports PDF, DOCX, TXT, CSV, and XLSX formats with detailed metadata preservation.
+    Supports PDF, DOCX, TXT, CSV, and XLSX formats with deep data cleaning and metadata preservation.
     """
 
     @classmethod
@@ -61,19 +108,20 @@ class DocumentParser:
             current_section = "Introduction"
             for page_idx in range(total_pages):
                 page = doc[page_idx]
-                text = page.get_text("text").strip()
-                if not text:
+                raw_text = page.get_text("text").strip()
+                cleaned = clean_research_text(raw_text)
+                if not cleaned:
                     continue
 
-                current_section = cls._detect_pdf_section(text, current_section)
+                current_section = cls._detect_pdf_section(cleaned, current_section)
                 items.append(ParsedDocumentItem(
-                    text=text,
+                    text=cleaned,
                     filename=filename,
                     file_type="pdf",
                     page=page_idx + 1,
                     total_pages=total_pages,
                     section=current_section,
-                    extra_metadata={"page_char_count": len(text)}
+                    extra_metadata={"page_char_count": len(cleaned)}
                 ))
             return items
         finally:
@@ -86,16 +134,17 @@ class DocumentParser:
         items: List[ParsedDocumentItem] = []
         total_pages = len(reader.pages)
         for page_idx, page in enumerate(reader.pages):
-            text = (page.extract_text() or "").strip()
-            if text:
+            raw_text = (page.extract_text() or "").strip()
+            cleaned = clean_research_text(raw_text)
+            if cleaned:
                 items.append(ParsedDocumentItem(
-                    text=text,
+                    text=cleaned,
                     filename=filename,
                     file_type="pdf",
                     page=page_idx + 1,
                     total_pages=total_pages,
                     section=f"Page {page_idx + 1}",
-                    extra_metadata={"page_char_count": len(text)}
+                    extra_metadata={"page_char_count": len(cleaned)}
                 ))
         return items
 
@@ -118,7 +167,7 @@ class DocumentParser:
         current_paragraphs: List[str] = []
 
         for p in doc.paragraphs:
-            text = p.text.strip()
+            text = clean_research_text(p.text)
             if not text:
                 continue
 
@@ -152,7 +201,7 @@ class DocumentParser:
         for table_idx, table in enumerate(doc.tables):
             table_data = []
             for row in table.rows:
-                row_data = [cell.text.strip() for cell in row.cells]
+                row_data = [clean_research_text(cell.text) for cell in row.cells]
                 if any(row_data):
                     table_data.append(" | ".join(row_data))
             if table_data:
@@ -190,7 +239,7 @@ class DocumentParser:
                 with open(file_path, "r", errors="ignore") as f:
                     content = f.read()
 
-            content = content.strip()
+            content = clean_research_text(content)
             if not content:
                 return []
 
@@ -223,7 +272,6 @@ class DocumentParser:
             df = pd.read_csv(file_path)
             items: List[ParsedDocumentItem] = []
 
-            # Metadata overview
             overview_text = (
                 f"Dataset File: {filename}\n"
                 f"Columns: {', '.join(df.columns.astype(str))}\n"
@@ -238,7 +286,6 @@ class DocumentParser:
                 extra_metadata={"rows": len(df), "columns": list(df.columns)}
             ))
 
-            # Batch rows into chunks of 15 rows with header
             chunk_size = 15
             for start_idx in range(0, min(len(df), 150), chunk_size):
                 sub_df = df.iloc[start_idx:start_idx + chunk_size]
@@ -293,4 +340,3 @@ class DocumentParser:
             return items
         except Exception as e:
             raise RuntimeError(f"Error parsing XLSX '{filename}': {str(e)}")
-

@@ -1,8 +1,9 @@
+import json
 import logging
-from typing import List, Tuple, Optional
+from typing import List, Optional, Dict, Any
 import numpy as np
 
-from ..models.schemas import DocumentChunk
+from ..models.schemas import DocumentChunk, DocumentMetadata
 from .embeddings import EmbeddingEngine
 from ..config import Config
 
@@ -10,42 +11,72 @@ logger = logging.getLogger("ResearchLens.VectorStore")
 
 
 class VectorStore:
-    """Vector database supporting FAISS index with automatic NumPy exact-cosine fallback.
-    Stores chunks and rich metadata, and exposes similarity scores and source details.
+    """Production vector database powered by ChromaDB persistent disk storage
+    with per-project collection isolation, rich metadata filtering, and high-performance
+    exact-cosine NumPy fallback.
     """
 
-    def __init__(self, embedding_engine: Optional[EmbeddingEngine] = None):
+    def __init__(
+        self,
+        embedding_engine: Optional[EmbeddingEngine] = None,
+        project_id: str = "default"
+    ):
         self.embedding_engine = embedding_engine or EmbeddingEngine()
+        self.project_id = project_id
+        self._chroma_client = None
+        self._collection = None
+        # In-memory mirror for fast retrieval and fallback
         self.chunks: List[DocumentChunk] = []
         self.vectors: Optional[np.ndarray] = None
-        self._faiss_index = None
-        self._use_faiss = False
-        self._init_faiss()
+        self._init_chromadb()
 
-    def _init_faiss(self):
+    def _clean_collection_name(self, name: str) -> str:
+        """Sanitizes project ID into valid ChromaDB collection name (3-63 chars, [a-zA-Z0-9_-])."""
+        clean = "".join(c if (c.isalnum() or c in ("-", "_")) else "_" for c in name)
+        if not clean or len(clean) < 3:
+            clean = f"project_{clean}"
+        return f"rl_{clean}"[:63]
+
+    def _init_chromadb(self):
         try:
-            import importlib
-            self.faiss = importlib.import_module("faiss")
-            self._use_faiss = True
-            logger.info("FAISS is available and initialized.")
-        except Exception:
-            logger.info("FAISS not installed. Using high-performance NumPy cosine similarity index.")
-            self._use_faiss = False
+            import chromadb
+            # Persistent disk client
+            self._chroma_client = chromadb.PersistentClient(path=str(Config.CHROMA_DIR))
+            col_name = self._clean_collection_name(self.project_id)
+            self._collection = self._chroma_client.get_or_create_collection(
+                name=col_name,
+                metadata={"hnsw:space": "cosine"}
+            )
+            logger.info(f"ChromaDB initialized collection '{col_name}' at {Config.CHROMA_DIR}")
+        except Exception as e:
+            logger.warning(f"ChromaDB initialization failed: {e}. Using NumPy fallback vector index.")
+            self._chroma_client = None
+            self._collection = None
 
     def clear(self):
-        """Clears stored chunks and resets the index."""
+        """Clears all stored chunks and resets the index."""
         self.chunks = []
         self.vectors = None
-        self._faiss_index = None
+        if self._chroma_client and self._collection:
+            try:
+                col_name = self._clean_collection_name(self.project_id)
+                self._chroma_client.delete_collection(col_name)
+                self._collection = self._chroma_client.get_or_create_collection(
+                    name=col_name,
+                    metadata={"hnsw:space": "cosine"}
+                )
+            except Exception as e:
+                logger.warning(f"Error resetting ChromaDB collection: {e}")
 
     def add_chunks(self, new_chunks: List[DocumentChunk]):
-        """Embeds and indexes a list of document and web chunks."""
+        """Embeds and indexes document chunks in ChromaDB and memory."""
         if not new_chunks:
             return
 
         texts = [c.text for c in new_chunks]
         new_vectors = self.embedding_engine.encode(texts)
 
+        # Update in-memory mirror
         if self.vectors is None or len(self.vectors) == 0:
             self.vectors = new_vectors
         else:
@@ -53,49 +84,117 @@ class VectorStore:
 
         self.chunks.extend(new_chunks)
 
-        if self._use_faiss:
+        # Update ChromaDB persistent collection
+        if self._collection is not None:
             try:
-                dim = self.vectors.shape[1]
-                # IndexFlatIP gives exact cosine similarity when vectors are unit normalized
-                self._faiss_index = self.faiss.IndexFlatIP(dim)
-                self._faiss_index.add(self.vectors.astype(np.float32))
+                ids = [c.chunk_id for c in new_chunks]
+                documents = texts
+                embeddings_list = [v.tolist() for v in new_vectors]
+
+                # ChromaDB requires flat metadata (no nested dicts)
+                metadatas = []
+                for c in new_chunks:
+                    meta = c.metadata
+                    flat_meta = {
+                        "source_type": meta.source_type or "unknown",
+                        "filename": meta.filename or "",
+                        "file_type": meta.file_type or "",
+                        "page": int(meta.page or 0),
+                        "section": meta.section or "",
+                        "title": meta.title or "",
+                        "url": meta.url or "",
+                        "extra_json": json.dumps(meta.extra or {})
+                    }
+                    metadatas.append(flat_meta)
+
+                # Upsert into ChromaDB
+                self._collection.upsert(
+                    ids=ids,
+                    documents=documents,
+                    embeddings=embeddings_list,
+                    metadatas=metadatas
+                )
+                logger.info(f"ChromaDB indexed {len(new_chunks)} chunks for project '{self.project_id}'.")
             except Exception as e:
-                logger.warning(f"Error updating FAISS index: {e}. Falling back to NumPy search.")
-                self._faiss_index = None
+                logger.warning(f"ChromaDB upsert failed: {e}. In-memory index active.")
 
-        logger.info(f"VectorStore indexed {len(new_chunks)} new chunks (Total: {len(self.chunks)}).")
-
-    def similarity_search(self, query: str, top_k: int = Config.TOP_K_RETRIEVAL) -> List[DocumentChunk]:
-        """Runs top-k semantic retrieval against all stored chunks, returning chunks with similarity scores."""
-        if not self.chunks or self.vectors is None or len(self.vectors) == 0:
+    def similarity_search(
+        self,
+        query: str,
+        top_k: int = Config.TOP_K_RETRIEVAL,
+        where: Optional[Dict[str, Any]] = None
+    ) -> List[DocumentChunk]:
+        """Runs top-k semantic retrieval against ChromaDB with NumPy cosine fallback."""
+        if not self.chunks and (self._collection is None or self._collection.count() == 0):
             return []
 
-        top_k = min(top_k, len(self.chunks))
         query_vec = self.embedding_engine.encode(query)
-
-        # Normalize query vector if needed
         q_norm = np.linalg.norm(query_vec)
         if q_norm > 1e-8:
             query_vec = query_vec / q_norm
 
         results: List[DocumentChunk] = []
 
-        if self._use_faiss and self._faiss_index is not None:
+        # 1. Try ChromaDB
+        if self._collection is not None and self._collection.count() > 0:
             try:
-                q_mat = np.expand_dims(query_vec, axis=0).astype(np.float32)
-                scores, indices = self._faiss_index.search(q_mat, top_k)
+                top_k = min(top_k, self._collection.count())
+                query_args: Dict[str, Any] = {
+                    "query_embeddings": [query_vec.tolist()],
+                    "n_results": top_k
+                }
+                if where:
+                    query_args["where"] = where
 
-                for score, idx in zip(scores[0], indices[0]):
-                    if idx >= 0 and idx < len(self.chunks):
-                        chunk_copy = self.chunks[idx].model_copy(deep=True)
-                        chunk_copy.score = float(score)
-                        results.append(chunk_copy)
-                return results
+                chroma_res = self._collection.query(**query_args)
+                if chroma_res and chroma_res.get("ids") and len(chroma_res["ids"][0]) > 0:
+                    ret_ids = chroma_res["ids"][0]
+                    ret_docs = chroma_res["documents"][0]
+                    ret_metas = chroma_res["metadatas"][0]
+                    ret_dists = chroma_res["distances"][0] if "distances" in chroma_res else [0.0] * len(ret_ids)
+
+                    # Build chunk map from in-memory cache if available
+                    mem_map = {c.chunk_id: c for c in self.chunks}
+
+                    for cid, text, meta_dict, dist in zip(ret_ids, ret_docs, ret_metas, ret_dists):
+                        score = round(max(0.0, 1.0 - float(dist)), 4)
+                        if cid in mem_map:
+                            c_copy = mem_map[cid].model_copy(deep=True)
+                            c_copy.score = score
+                            results.append(c_copy)
+                        else:
+                            extra = {}
+                            if "extra_json" in meta_dict:
+                                try:
+                                    extra = json.loads(meta_dict["extra_json"])
+                                except Exception:
+                                    pass
+
+                            metadata = DocumentMetadata(
+                                source_type=meta_dict.get("source_type", "uploaded_document"),
+                                filename=meta_dict.get("filename") or None,
+                                file_type=meta_dict.get("file_type") or None,
+                                page=meta_dict.get("page") if meta_dict.get("page", 0) > 0 else None,
+                                section=meta_dict.get("section") or None,
+                                title=meta_dict.get("title") or None,
+                                url=meta_dict.get("url") or None,
+                                extra=extra
+                            )
+                            results.append(DocumentChunk(
+                                chunk_id=cid,
+                                text=text,
+                                metadata=metadata,
+                                score=score
+                            ))
+                    return results
             except Exception as e:
-                logger.warning(f"FAISS search failed: {e}. Using NumPy search.")
+                logger.warning(f"ChromaDB search failed: {e}. Falling back to NumPy cosine search.")
 
-        # NumPy Cosine Similarity Search
-        # Vectors are already unit normalized; dot product is cosine similarity
+        # 2. NumPy Cosine Similarity Fallback
+        if not self.chunks or self.vectors is None or len(self.vectors) == 0:
+            return []
+
+        top_k = min(top_k, len(self.chunks))
         similarities = np.dot(self.vectors, query_vec)
         top_indices = np.argsort(similarities)[::-1][:top_k]
 
@@ -109,4 +208,3 @@ class VectorStore:
     def get_all_chunks(self) -> List[DocumentChunk]:
         """Returns all chunks currently stored in the index."""
         return self.chunks
-

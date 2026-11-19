@@ -6,6 +6,7 @@ export default function NewProjectModal({
   onClose,
   onCreate,
   models = [],
+  embeddingModels = [],
   presets = [],
 }) {
   const [title, setTitle] = useState('');
@@ -16,6 +17,7 @@ export default function NewProjectModal({
     'Focus on research gaps, use an academic tone, add a comparison table, and keep the report under four pages.'
   );
   const [model, setModel] = useState('openai/gpt-oss-120b');
+  const [embeddingModel, setEmbeddingModel] = useState('BAAI/bge-small-en-v1.5');
   const [seedUrls, setSeedUrls] = useState('https://arxiv.org/abs/2312.10997');
   const [crawlDepth, setCrawlDepth] = useState(1);
   const [maxPages, setMaxPages] = useState(12);
@@ -56,6 +58,7 @@ export default function NewProjectModal({
         directives,
         preset,
         model,
+        embedding_model: embeddingModel,
         seed_urls: urls,
         crawl_depth: Number(crawlDepth),
         max_pages: Number(maxPages),
@@ -204,6 +207,21 @@ export default function NewProjectModal({
 
             {showAdvanced && (
               <div className="p-4 border-t border-[#30363d] space-y-4 text-xs">
+                <div>
+                  <label className="text-gray-300 block mb-1 font-medium">Embedding Model (ChromaDB Vector Store)</label>
+                  <select
+                    value={embeddingModel}
+                    onChange={(e) => setEmbeddingModel(e.target.value)}
+                    className="w-full bg-[#0d1117] border border-[#30363d] rounded-lg p-2 text-white font-mono text-xs focus:outline-none focus:border-indigo-500"
+                  >
+                    {(embeddingModels.length > 0 ? embeddingModels : ['BAAI/bge-small-en-v1.5', 'all-MiniLM-L6-v2', 'all-mpnet-base-v2', 'nomic-ai/nomic-embed-text-v1.5']).map((em) => (
+                      <option key={em} value={em}>
+                        {em}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
                 <div className="grid grid-cols-2 gap-4">
                   <div>
                     <label className="text-gray-400 block mb-1">Max Depth: {crawlDepth}</label>

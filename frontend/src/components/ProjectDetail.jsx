@@ -19,6 +19,7 @@ export default function ProjectDetail({
   onNavigateHome,
   onRefreshProject,
   models = [],
+  embeddingModels = [],
   presets = []
 }) {
   const [activeTab, setActiveTab] = useState('reports');
@@ -177,6 +178,7 @@ export default function ProjectDetail({
           <SettingsView
             project={project}
             models={models}
+            embeddingModels={embeddingModels}
             presets={presets}
             onRefreshProject={onRefreshProject}
           />

@@ -5,6 +5,7 @@ import { updateProject } from '../api';
 export default function SettingsView({
   project,
   models = [],
+  embeddingModels = [],
   presets = [],
   onRefreshProject
 }) {
@@ -13,6 +14,7 @@ export default function SettingsView({
   const [preset, setPreset] = useState(project.preset || 'Standard Brief');
   const [directives, setDirectives] = useState(project.directives || '');
   const [model, setModel] = useState(project.model || 'openai/gpt-oss-120b');
+  const [embeddingModel, setEmbeddingModel] = useState(project.embedding_model || 'BAAI/bge-small-en-v1.5');
   const [seedUrls, setSeedUrls] = useState((project.seed_urls || []).join('\n'));
   const [crawlDepth, setCrawlDepth] = useState(project.crawl_depth || 1);
   const [maxPages, setMaxPages] = useState(project.max_pages || 12);
@@ -31,6 +33,7 @@ export default function SettingsView({
     setPreset(project.preset || 'Standard Brief');
     setDirectives(project.directives || '');
     setModel(project.model || 'openai/gpt-oss-120b');
+    setEmbeddingModel(project.embedding_model || 'BAAI/bge-small-en-v1.5');
     setSeedUrls((project.seed_urls || []).join('\n'));
     setCrawlDepth(project.crawl_depth || 1);
     setMaxPages(project.max_pages || 12);
@@ -66,6 +69,7 @@ export default function SettingsView({
         preset,
         directives,
         model,
+        embedding_model: embeddingModel,
         seed_urls: urls,
         crawl_depth: Number(crawlDepth),
         max_pages: Number(maxPages),
@@ -143,7 +147,7 @@ export default function SettingsView({
           />
         </div>
 
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
           <div>
             <label className="block text-xs font-semibold uppercase tracking-wider text-gray-300 mb-1.5">
               Synthesis LLM Model
@@ -156,6 +160,23 @@ export default function SettingsView({
               {models.map((m) => (
                 <option key={m} value={m}>
                   {m}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div>
+            <label className="block text-xs font-semibold uppercase tracking-wider text-gray-300 mb-1.5">
+              Embedding Model (Vector DB)
+            </label>
+            <select
+              value={embeddingModel}
+              onChange={(e) => setEmbeddingModel(e.target.value)}
+              className="w-full bg-[#0d1117] border border-[#30363d] rounded-lg px-3.5 py-2 text-sm text-white focus:outline-none focus:border-indigo-500"
+            >
+              {(embeddingModels.length > 0 ? embeddingModels : ['BAAI/bge-small-en-v1.5', 'all-MiniLM-L6-v2', 'all-mpnet-base-v2', 'nomic-ai/nomic-embed-text-v1.5']).map((em) => (
+                <option key={em} value={em}>
+                  {em}
                 </option>
               ))}
             </select>
